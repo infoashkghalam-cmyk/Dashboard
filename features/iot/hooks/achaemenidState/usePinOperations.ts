@@ -1,0 +1,84 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useIoTStore } from "@/features/iot/hooks/useIoTStore";
+import {
+  isCloudflareEnabled,
+  updatePinOnCloudflare,
+} from "@/features/iot/services/cloudflareService";
+import { publishPinCommand, initMqtt, onMqttStateChange } from "@/features/iot/services/mqttService";
+
+interface UsePinOperationsProps {
+  refetchIot: () => void;
+}
+
+export function usePinOperations({ refetchIot }: UsePinOperationsProps) {
+  const { pinsState, setPinsState, showToast } = useIoTStore();
+  const [isLoadingIoT, setIsLoadingIoT] = useState(false);
+
+  useEffect(() => {
+    initMqtt();
+    const unsubscribe = onMqttStateChange((pin, state) => {
+      setPinsState((prev) => ({ ...prev, [pin]: state }));
+    });
+    return () => unsubscribe();
+  }, [setPinsState]);
+
+  const updatePinOnServer = async (
+    pin: string,
+    pinState: boolean,
+    preventMqtt: boolean = false,
+    timer?: number,
+  ) => {
+    setIsLoadingIoT(true);
+    try {
+      setPinsState((prev) => ({ ...prev, [pin]: pinState }));
+
+      if (!preventMqtt) {
+        // انتشار فرمان سریعاً در MQTT (سرعت بالا بدون منتظر ماندن برای سرور)
+        publishPinCommand(pin, pinState, timer);
+      }
+
+      if (isCloudflareEnabled()) {
+        try {
+          const result = await updatePinOnCloudflare(pin, pinState);
+          if (result.success) {
+            showToast(result.message, "success");
+          } else {
+            showToast(result.message, "error");
+          }
+        } catch (e) {
+          console.error(`Failed to sync pin ${pin} value to Cloudflare:`, e);
+          showToast(`تغییرات پین ${pin} بنا به دلایل فنی ذخیره نشد.`, "error");
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await refetchIot();
+    } catch (error) {
+      console.error("Failed to update pin value:", error);
+    } finally {
+      setIsLoadingIoT(false);
+    }
+  };
+
+  const handleTogglePin = async (pin: string) => {
+    const nextState = !pinsState[pin];
+    setPinsState((prev) => ({ ...prev, [pin]: nextState }));
+    const segment = useIoTStore.getState().segments.find((s) => s.pin === pin);
+    await updatePinOnServer(pin, nextState, false, segment?.auto_off);
+  };
+
+  const handleSetPinState = async (pin: string, state: boolean, preventMqtt: boolean = false) => {
+    setPinsState((prev) => ({ ...prev, [pin]: state }));
+    const segment = useIoTStore.getState().segments.find((s) => s.pin === pin);
+    await updatePinOnServer(pin, state, preventMqtt, segment?.auto_off);
+  };
+
+  return {
+    isLoadingIoT,
+    updatePinOnServer,
+    handleTogglePin,
+    handleSetPinState,
+  };
+}
